@@ -435,6 +435,12 @@ textarea.mono{font-family:ui-monospace,'SFMono-Regular',Menlo,monospace;font-siz
   <!-- ===== แท็บจัดการข้อสอบ ===== -->
   <section id="view-admin" class="tab-view hidden">
     <div class="card">
+      <h2 class="section">☁️ สถานะ Firestore</h2>
+      <p class="section-sub" id="fsStatus">กำลังตรวจสอบการเชื่อมต่อ...</p>
+      <button class="btn" id="fsSeedBtn" style="display:none" onclick="seedFirestore()">อัปโหลดตัวอย่างขึ้น Firestore</button>
+    </div>
+
+    <div class="card">
       <h2 class="section">➕ เพิ่มข้อสอบ <span class="count-badge" id="adminCount"></span></h2>
       <p class="section-sub">กรอกตาม schema แล้วบันทึกเพิ่มเข้าคลังทันที</p>
 
@@ -503,9 +509,14 @@ textarea.mono{font-family:ui-monospace,'SFMono-Regular',Menlo,monospace;font-siz
 
 <div class="toast" id="toast"></div>
 
+<!-- Firebase SDK (compat) — โหลดก่อนสคริปต์หลัก -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+
 <script>
 /* ============================================================
-   1) แหล่งข้อมูล — แก้ตรงนี้จุดเดียวเวลาย้ายไป Firestore
+   1) ข้อสอบตัวอย่าง (ใช้ตอน Firestore ยังว่าง/ต่อไม่ติด)
+      โครงสร้างเดียวกับที่เก็บใน Firestore
    โครงสร้าง 1 ข้อ:
    { id, part(1-7), passage, question, choices[],
      answer(index เริ่มที่ 0), explainCorrect,
@@ -585,15 +596,85 @@ const QUESTIONS = [
 ];
 
 /* ============================================================
-   2) loadQuestions() — ฟังก์ชันเดียวสำหรับดึงข้อมูล
-   ตอนนี้อ่านจากตัวแปร QUESTIONS
-   เวลาย้ายไป Firestore ให้แก้ที่ฟังก์ชันนี้ที่เดียว เช่น:
-     const snap = await db.collection('questions').get();
-     return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+   2) แหล่งข้อมูล Firebase Firestore
+   จุดเชื่อม data source ทั้งหมดอยู่ในส่วนนี้ที่เดียว
    ============================================================ */
+
+// --- Firebase config (web config เปิดเผยได้ ปลอดภัยที่จะฝังใน client code) ---
+const firebaseConfig = {
+  apiKey: "AIzaSyA480tLZ2QABe1hOP5buaCE5pXIXBoPaeE",
+  authDomain: "toeic-practice-41159.firebaseapp.com",
+  projectId: "toeic-practice-41159",
+  storageBucket: "toeic-practice-41159.firebasestorage.app",
+  messagingSenderId: "716491327799",
+  appId: "1:716491327799:web:576476af3fdeee031d32b2"
+};
+
+const COLLECTION = "toeic_questions";   // ชื่อ collection ที่เก็บข้อสอบใน Firestore
+
+// เริ่มต้น Firebase (ครอบ try กันพังถ้าโหลด SDK ไม่ได้/ออฟไลน์)
+let db = null;
+try {
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.firestore();
+} catch (e) {
+  console.warn("เริ่ม Firebase ไม่สำเร็จ จะใช้ข้อมูลตัวอย่างในเครื่องแทน:", e);
+}
+
+// สถานะแหล่งข้อมูลปัจจุบัน (ให้ UI แสดงผล)
+const dataSource = { mode: "local", cloudCount: 0, error: "" };
+
+/*
+  loadQuestions() — ฟังก์ชันเดียวสำหรับดึงข้อสอบทั้งหมด
+  ลำดับการทำงาน: อ่านจาก Firestore ก่อน → ถ้าว่างหรือพัง ใช้ตัวอย่างในไฟล์แทน
+  (เปลี่ยน data source อื่นในอนาคต แก้แค่ฟังก์ชันนี้)
+*/
 async function loadQuestions(){
-  // จำลอง async เพื่อให้สลับไป Firestore ได้ง่าย (คงรูปแบบ Promise)
-  return Promise.resolve(QUESTIONS.map(q => ({...q})));
+  if (db) {
+    try {
+      const snap = await db.collection(COLLECTION).get();
+      const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      dataSource.cloudCount = rows.length;
+      if (rows.length) { dataSource.mode = "firestore"; dataSource.error = ""; return rows; }
+      dataSource.mode = "local-empty";                 // ต่อติดแต่ยังไม่มีข้อมูล
+      return QUESTIONS.map(q => ({...q}));
+    } catch (e) {
+      console.warn("อ่าน Firestore ไม่ได้ ใช้ข้อมูลตัวอย่างแทน:", e);
+      dataSource.mode = "local-error"; dataSource.error = e.message || String(e);
+      return QUESTIONS.map(q => ({...q}));
+    }
+  }
+  dataSource.mode = "local";
+  return QUESTIONS.map(q => ({...q}));
+}
+
+/* เขียนข้อสอบ 1 ข้อขึ้น Firestore (ใช้ auto-id ของ Firestore ไม่เก็บ field id ซ้ำ) */
+async function dbAddQuestion(q){
+  if (!db) throw new Error("ยังไม่ได้เชื่อม Firestore");
+  const { id, ...data } = q;                 // ตัด id ชั่วคราวออก ให้ Firestore สร้างเอง
+  const ref = await db.collection(COLLECTION).add(data);
+  return ref.id;
+}
+
+/* เขียนหลายข้อพร้อมกันแบบ batch */
+async function dbAddMany(arr){
+  if (!db) throw new Error("ยังไม่ได้เชื่อม Firestore");
+  const batch = db.batch();
+  arr.forEach(q => {
+    const { id, ...data } = q;
+    const ref = db.collection(COLLECTION).doc();   // auto id
+    batch.set(ref, data);
+  });
+  await batch.commit();
+  return arr.length;
+}
+
+/* โหลด pool ใหม่จากแหล่งข้อมูล แล้ว refresh UI ที่เกี่ยวข้อง */
+async function reloadPool(){
+  state.pool = await loadQuestions();
+  updateAdminCount();
+  renderPartChips();
+  renderFirestoreStatus();
 }
 
 /* ============================================================
@@ -636,6 +717,7 @@ async function init(){
   buildChoiceFields(4);
   updateAdminCount();
   updatePoolInfo();
+  renderFirestoreStatus();
 }
 
 /* ---- แท็บนำทาง ---- */
@@ -654,6 +736,7 @@ function switchTab(name){
     document.getElementById('view-stats').classList.remove('hidden');
   } else if(name==='admin'){
     updateAdminCount();
+    renderFirestoreStatus();
     document.getElementById('view-admin').classList.remove('hidden');
   }
 }
@@ -975,7 +1058,7 @@ function addChoiceField(){
   wrap.appendChild(makeChoiceField(i));
 }
 
-function saveNewQuestion(){
+async function saveNewQuestion(){
   const part=parseInt(document.getElementById('fPart').value);
   const difficulty=document.getElementById('fDiff').value;
   const passage=document.getElementById('fPassage').value.trim();
@@ -1006,8 +1089,21 @@ function saveNewQuestion(){
     explainCorrect,
     explainWrong:{}, difficulty, tags
   };
-  state.pool.push(q);
-  updateAdminCount(); renderPartChips();
+
+  // เขียนขึ้น Firestore ก่อน (ถ้าเชื่อมได้) แล้วโหลด pool ใหม่ให้ id ตรงกับคลาวด์
+  if (db) {
+    try {
+      await dbAddQuestion(q);
+      await reloadPool();
+      toast('บันทึกขึ้น Firestore แล้ว ✓','ok');
+    } catch (e) {
+      state.pool.push(q); updateAdminCount(); renderPartChips();
+      toast('บันทึกในเครื่องแล้ว แต่ขึ้น Firestore ไม่ได้: '+(e.message||e),'err');
+    }
+  } else {
+    state.pool.push(q); updateAdminCount(); renderPartChips();
+    toast('บันทึกในเครื่องแล้ว (ยังไม่ได้เชื่อม Firestore)','ok');
+  }
 
   // เคลียร์ฟอร์ม
   document.getElementById('fPassage').value='';
@@ -1015,10 +1111,9 @@ function saveNewQuestion(){
   document.getElementById('fExplainOk').value='';
   document.getElementById('fTags').value='';
   buildChoiceFields(4);
-  toast('บันทึกข้อสอบแล้ว ✓','ok');
 }
 
-function importJSON(){
+async function importJSON(){
   const raw=document.getElementById('fImport').value.trim();
   if(!raw){ toast('วาง JSON ก่อนนะ','err'); return; }
   let arr;
@@ -1026,13 +1121,13 @@ function importJSON(){
   catch(e){ toast('JSON ไม่ถูกต้อง: '+e.message,'err'); return; }
   if(!Array.isArray(arr)){ toast('ต้องเป็น array [ ... ]','err'); return; }
 
-  let ok=0, skip=0;
+  // คัดเฉพาะข้อที่รูปแบบครบ (normalize ให้ตรง schema)
+  const valid=[]; let skip=0;
   arr.forEach((item,i)=>{
-    // ตรวจฟิลด์ขั้นต่ำ
     if(!item || typeof item!=='object') { skip++; return; }
     if(!item.question || !Array.isArray(item.choices) || item.choices.length<2){ skip++; return; }
     if(typeof item.answer!=='number' || item.answer<0 || item.answer>=item.choices.length){ skip++; return; }
-    state.pool.push({
+    valid.push({
       id: item.id || ('q'+Date.now()+'_'+i),
       part: Number(item.part)||5,
       passage: item.passage||'',
@@ -1044,11 +1139,50 @@ function importJSON(){
       difficulty: item.difficulty||'medium',
       tags: Array.isArray(item.tags)?item.tags:[]
     });
-    ok++;
   });
-  updateAdminCount(); renderPartChips();
-  document.getElementById('fImport').value='';
-  toast(`นำเข้าสำเร็จ ${ok} ข้อ${skip?` · ข้าม ${skip} ข้อ (รูปแบบไม่ครบ)`:''}`, ok?'ok':'err');
+
+  if(!valid.length){ toast(`ไม่มีข้อที่รูปแบบครบ (ข้าม ${skip} ข้อ)`,'err'); return; }
+
+  // เขียนขึ้น Firestore เป็น batch แล้วโหลด pool ใหม่
+  if (db) {
+    try {
+      await dbAddMany(valid);
+      await reloadPool();
+      document.getElementById('fImport').value='';
+      toast(`นำเข้าขึ้น Firestore ${valid.length} ข้อ${skip?` · ข้าม ${skip} ข้อ`:''} ✓`,'ok');
+    } catch (e) {
+      valid.forEach(v=>state.pool.push(v)); updateAdminCount(); renderPartChips();
+      toast(`นำเข้าในเครื่องแล้ว แต่ขึ้น Firestore ไม่ได้: ${e.message||e}`,'err');
+    }
+  } else {
+    valid.forEach(v=>state.pool.push(v)); updateAdminCount(); renderPartChips();
+    document.getElementById('fImport').value='';
+    toast(`นำเข้าในเครื่อง ${valid.length} ข้อ${skip?` · ข้าม ${skip} ข้อ`:''} (ยังไม่ได้เชื่อม Firestore)`,'ok');
+  }
+}
+
+/* ---- สถานะ Firestore + ปุ่ม seed ตัวอย่าง (แสดงในแท็บ Admin) ---- */
+function renderFirestoreStatus(){
+  const el=document.getElementById('fsStatus'); if(!el) return;
+  const seedBtn=document.getElementById('fsSeedBtn');
+  let msg='';
+  if(!db){ msg='⚠️ โหลด Firebase SDK ไม่ได้ — กำลังใช้ข้อมูลตัวอย่างในเครื่อง'; }
+  else if(dataSource.mode==='firestore'){ msg=`🟢 เชื่อม Firestore แล้ว · มี ${dataSource.cloudCount} ข้อในคลาวด์ (collection: ${COLLECTION})`; }
+  else if(dataSource.mode==='local-empty'){ msg='🟡 เชื่อม Firestore ได้ แต่ยังไม่มีข้อมูล — กดปุ่มด้านล่างเพื่ออัปโหลดตัวอย่าง 4 ข้อขึ้นคลาวด์'; }
+  else if(dataSource.mode==='local-error'){ msg='🔴 อ่าน Firestore ไม่ได้ ('+dataSource.error+') — ใช้ตัวอย่างในเครื่องชั่วคราว'; }
+  else { msg='ใช้ข้อมูลตัวอย่างในเครื่อง'; }
+  el.textContent=msg;
+  if(seedBtn) seedBtn.style.display = (db && (dataSource.mode==='local-empty')) ? 'inline-flex' : 'none';
+}
+
+/* อัปโหลดข้อสอบตัวอย่างขึ้น Firestore (ใช้ครั้งเดียวตอนคลาวด์ยังว่าง) */
+async function seedFirestore(){
+  if(!db){ toast('ยังไม่ได้เชื่อม Firestore','err'); return; }
+  try{
+    await dbAddMany(QUESTIONS);
+    await reloadPool();
+    toast('อัปโหลดตัวอย่างขึ้น Firestore แล้ว ✓','ok');
+  }catch(e){ toast('อัปโหลดไม่ได้: '+(e.message||e),'err'); }
 }
 
 function fillSampleImport(){
