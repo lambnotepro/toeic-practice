@@ -192,6 +192,16 @@ h2.section{font-size:17px;font-weight:700;margin-bottom:4px;display:flex;align-i
 }
 .qtext{font-size:16.5px;font-weight:600;margin-bottom:18px;line-height:1.55}
 
+/* --- โหมด Listening (TTS) --- */
+.audio-box{
+  background:var(--glass-2);border:1px solid var(--stroke);border-left:3px solid var(--purple);
+  border-radius:12px;padding:14px 16px;margin-bottom:16px;
+}
+.audio-controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.audio-speed{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.audio-speed select{background:var(--bg-2);color:var(--ink);border:1px solid var(--stroke);border-radius:8px;padding:6px 9px;font-size:13px}
+.audio-hint{font-size:12px;color:var(--muted-2);margin-top:10px}
+
 .choices{display:flex;flex-direction:column;gap:11px}
 .choice{
   display:flex;align-items:flex-start;gap:13px;cursor:pointer;
@@ -376,6 +386,23 @@ textarea.mono{font-family:ui-monospace,'SFMono-Regular',Menlo,monospace;font-siz
       <div class="progress"><i id="qProgress" style="width:0%"></i></div>
 
       <div class="passage hidden" id="qPassage"></div>
+
+      <div class="audio-box hidden" id="qAudio">
+        <div class="audio-controls">
+          <button class="btn btn-primary" id="btnPlay" onclick="playAudio()">🔊 เล่นเสียง</button>
+          <button class="btn btn-ghost" onclick="playAudio()">🔁 ฟังซ้ำ</button>
+          <label class="audio-speed">ความเร็ว
+            <select id="audioRate">
+              <option value="1">ปกติ</option>
+              <option value="0.8">ช้า</option>
+              <option value="0.65">ช้ามาก</option>
+            </select>
+          </label>
+          <button class="btn btn-ghost" id="btnTranscript" onclick="toggleTranscript()">แสดงบทพูด</button>
+        </div>
+        <p class="audio-hint">🎧 ฟังเสียงแล้วตอบ — เปิด "แสดงบทพูด" ไว้ทบทวนหลังตอบ (เสมือนสอบจริงคือฟังอย่างเดียว)</p>
+      </div>
+
       <div class="qtext" id="qText"></div>
       <div class="choices" id="qChoices"></div>
 
@@ -671,7 +698,6 @@ async function adminLogin(){
   const pass=document.getElementById('authPass').value||'';
   if(!raw||!pass){ toast('กรอกชื่อผู้ใช้และรหัสผ่านให้ครบ','err'); return; }
   // แปลง username → email ให้ Firebase Auth (พิมพ์ "admin" พอ ระบบเติมโดเมนให้เอง)
-  // ถ้าพิมพ์อีเมลเต็ม (มี @) จะใช้ตามนั้นเลย
   const email = raw.includes('@') ? raw : raw.toLowerCase()+'@toeic-practice.app';
   try{
     await auth.signInWithEmailAndPassword(email,pass);
@@ -788,6 +814,7 @@ async function init(){
 
 /* ---- แท็บนำทาง ---- */
 function switchTab(name){
+  stopAudio();
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name));
   // ซ่อนทุก view
   ['setup','quiz','result','stats','admin'].forEach(v=>{
@@ -884,6 +911,47 @@ function startSession(){
   renderQuestion();
 }
 
+/* ============================================================
+   โหมด Listening — เสียงอ่าน TTS (Web Speech API ในเบราว์เซอร์)
+   ============================================================ */
+let _voices=[];
+function loadVoices(){ if(window.speechSynthesis) _voices=speechSynthesis.getVoices()||[]; }
+if(window.speechSynthesis){
+  loadVoices();
+  speechSynthesis.onvoiceschanged=loadVoices;   // เสียงโหลดแบบ async ในบางเบราว์เซอร์
+}
+/* เลือกเสียงภาษาอังกฤษ: US ก่อน → UK → en อื่นๆ */
+function pickEnVoice(){
+  if(!_voices.length) loadVoices();
+  return _voices.find(v=>/en[-_]US/i.test(v.lang)) ||
+         _voices.find(v=>/en[-_]GB/i.test(v.lang)) ||
+         _voices.find(v=>/^en/i.test(v.lang)) || null;
+}
+function speak(text, rate){
+  if(!window.speechSynthesis){ toast('เบราว์เซอร์นี้ไม่รองรับเสียงอ่าน (TTS)','err'); return; }
+  speechSynthesis.cancel();                       // หยุดเสียงเดิมก่อน
+  const u=new SpeechSynthesisUtterance(text);
+  const v=pickEnVoice(); if(v) u.voice=v;
+  u.lang=(v&&v.lang)||'en-US';
+  u.rate=rate||1; u.pitch=1;
+  speechSynthesis.speak(u);
+}
+function stopAudio(){ if(window.speechSynthesis) speechSynthesis.cancel(); }
+function playAudio(){
+  const q=state.session[state.index]; if(!q||!q.passage) return;
+  const sel=document.getElementById('audioRate');
+  const rate=sel?parseFloat(sel.value)||1:1;
+  speak(q.passage, rate);
+}
+/* สลับแสดง/ซ่อนบทพูด (ไว้ทบทวนหลังตอบ) */
+function toggleTranscript(){
+  const pas=document.getElementById('qPassage');
+  const btn=document.getElementById('btnTranscript');
+  const wasHidden=pas.classList.contains('hidden');
+  pas.classList.toggle('hidden');
+  if(btn) btn.textContent = wasHidden ? 'ซ่อนบทพูด' : 'แสดงบทพูด';
+}
+
 function renderQuestion(){
   const q=state.session[state.index];
   state.selected=null;
@@ -894,10 +962,25 @@ function renderQuestion(){
   document.getElementById('qDiff').textContent=q.difficulty||'';
   document.getElementById('qProgress').style.width=((state.index)/state.session.length*100)+'%';
 
-  // passage
+  // passage / audio — Part 1-4 = โหมดฟัง (ซ่อนบทพูด โชว์ปุ่มเสียง) · Part 5-7 = โหมดอ่าน (โชว์ข้อความ)
   const pas=document.getElementById('qPassage');
-  if(q.passage && q.passage.trim()){ pas.textContent=q.passage; pas.classList.remove('hidden'); }
-  else pas.classList.add('hidden');
+  const audio=document.getElementById('qAudio');
+  const isListening=[1,2,3,4].includes(Number(q.part));
+  stopAudio();
+  if(q.passage && q.passage.trim()){
+    pas.textContent=q.passage;
+    if(isListening){
+      pas.classList.add('hidden');            // ซ่อนบทพูดไว้ก่อน (ฟังอย่างเดียว)
+      audio.classList.remove('hidden');
+      document.getElementById('btnTranscript').textContent='แสดงบทพูด';
+    } else {
+      pas.classList.remove('hidden');         // โหมดอ่าน: แสดงข้อความ
+      audio.classList.add('hidden');
+    }
+  } else {
+    pas.classList.add('hidden');
+    audio.classList.add('hidden');
+  }
 
   document.getElementById('qText').textContent=q.question;
 
@@ -982,6 +1065,7 @@ function quitSession(){
 }
 function backToSetup(){
   stopTimer();
+  stopAudio();
   state.session=[];
   document.getElementById('view-quiz').classList.add('hidden');
   document.getElementById('view-result').classList.add('hidden');
@@ -1015,6 +1099,7 @@ function updateTimerText(){
    ============================================================ */
 function finishSession(){
   stopTimer();
+  stopAudio();
   state.checkedAll=true;
   const total=state.results.length;
   const right=state.results.filter(r=>r.correct).length;
