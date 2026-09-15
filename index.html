@@ -434,12 +434,27 @@ textarea.mono{font-family:ui-monospace,'SFMono-Regular',Menlo,monospace;font-siz
 
   <!-- ===== แท็บจัดการข้อสอบ ===== -->
   <section id="view-admin" class="tab-view hidden">
+    <div class="card" id="adminLoginCard">
+      <h2 class="section">🔐 เข้าสู่ระบบผู้ดูแล</h2>
+      <p class="section-sub" id="authStatus">ต้องล็อกอินก่อนจึงจะเพิ่ม/นำเข้าข้อสอบได้ (คนทั่วไปฝึกทำได้ปกติโดยไม่ต้องล็อกอิน)</p>
+      <div id="loginBox">
+        <label class="fl">ชื่อผู้ใช้ (username)</label>
+        <input class="f" id="authEmail" type="text" placeholder="admin" value="admin" autocomplete="username" />
+        <label class="fl">รหัสผ่าน</label>
+        <input class="f" id="authPass" type="password" placeholder="••••••••" autocomplete="current-password" onkeydown="if(event.key==='Enter')adminLogin()" />
+        <button class="btn btn-primary btn-lg" style="margin-top:16px" onclick="adminLogin()">เข้าสู่ระบบ</button>
+        <p class="hint" style="margin-top:10px">ผู้ดูแลเท่านั้น · ล็อกอินครั้งเดียวจะจำไว้บนเครื่องนี้</p>
+      </div>
+      <button class="btn btn-ghost" id="logoutBtn" style="display:none" onclick="adminLogout()">ออกจากระบบ</button>
+    </div>
+
     <div class="card">
       <h2 class="section">☁️ สถานะ Firestore</h2>
       <p class="section-sub" id="fsStatus">กำลังตรวจสอบการเชื่อมต่อ...</p>
       <button class="btn" id="fsSeedBtn" style="display:none" onclick="seedFirestore()">อัปโหลดตัวอย่างขึ้น Firestore</button>
     </div>
 
+    <div id="adminWriteTools" style="display:none">
     <div class="card">
       <h2 class="section">➕ เพิ่มข้อสอบ <span class="count-badge" id="adminCount"></span></h2>
       <p class="section-sub">กรอกตาม schema แล้วบันทึกเพิ่มเข้าคลังทันที</p>
@@ -504,6 +519,7 @@ textarea.mono{font-family:ui-monospace,'SFMono-Regular',Menlo,monospace;font-siz
       </div>
       <p class="hint">รูปแบบต้องมีอย่างน้อย: part, question, choices[], answer — ฟิลด์อื่นเว้นได้</p>
     </div>
+    </div><!-- /adminWriteTools -->
   </section>
 </div>
 
@@ -512,6 +528,7 @@ textarea.mono{font-family:ui-monospace,'SFMono-Regular',Menlo,monospace;font-siz
 <!-- Firebase SDK (compat) — โหลดก่อนสคริปต์หลัก -->
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 
 <script>
 /* ============================================================
@@ -614,15 +631,64 @@ const COLLECTION = "toeic_questions";   // ชื่อ collection ที่เ�
 
 // เริ่มต้น Firebase (ครอบ try กันพังถ้าโหลด SDK ไม่ได้/ออฟไลน์)
 let db = null;
+let auth = null;
 try {
   firebase.initializeApp(firebaseConfig);
   db = firebase.firestore();
+  auth = firebase.auth();
 } catch (e) {
   console.warn("เริ่ม Firebase ไม่สำเร็จ จะใช้ข้อมูลตัวอย่างในเครื่องแทน:", e);
 }
 
 // สถานะแหล่งข้อมูลปัจจุบัน (ให้ UI แสดงผล)
 const dataSource = { mode: "local", cloudCount: 0, error: "" };
+
+/* ---- ระบบล็อกอินผู้ดูแล (Firebase Auth) ----
+   อ่านข้อสอบ = ทุกคน (ไม่ต้องล็อกอิน) · เขียน = เฉพาะผู้ดูแลที่ล็อกอิน
+   สถานะล็อกอินคงอยู่ข้ามการรีเฟรชอัตโนมัติ (ล็อกอินครั้งเดียวบนเครื่องนั้น) */
+function renderAuthUI(user){
+  const loginBox=document.getElementById('loginBox');
+  const logoutBtn=document.getElementById('logoutBtn');
+  const writeTools=document.getElementById('adminWriteTools');
+  const status=document.getElementById('authStatus');
+  if(user){
+    if(loginBox) loginBox.style.display='none';
+    if(logoutBtn) logoutBtn.style.display='inline-flex';
+    if(writeTools) writeTools.style.display='';
+    if(status) status.textContent='🟢 ล็อกอินแล้ว: '+user.email+' — เพิ่ม/นำเข้าข้อสอบได้';
+  } else {
+    if(loginBox) loginBox.style.display='';
+    if(logoutBtn) logoutBtn.style.display='none';
+    if(writeTools) writeTools.style.display='none';
+    if(status) status.textContent='ต้องล็อกอินก่อนจึงจะเพิ่ม/นำเข้าข้อสอบได้ (คนทั่วไปฝึกทำได้ปกติโดยไม่ต้องล็อกอิน)';
+  }
+  renderFirestoreStatus();
+}
+
+async function adminLogin(){
+  if(!auth){ toast('ระบบล็อกอินยังไม่พร้อม','err'); return; }
+  const raw=(document.getElementById('authEmail').value||'').trim();
+  const pass=document.getElementById('authPass').value||'';
+  if(!raw||!pass){ toast('กรอกชื่อผู้ใช้และรหัสผ่านให้ครบ','err'); return; }
+  // แปลง username → email ให้ Firebase Auth (พิมพ์ "admin" พอ ระบบเติมโดเมนให้เอง)
+  // ถ้าพิมพ์อีเมลเต็ม (มี @) จะใช้ตามนั้นเลย
+  const email = raw.includes('@') ? raw : raw.toLowerCase()+'@toeic-practice.app';
+  try{
+    await auth.signInWithEmailAndPassword(email,pass);
+    document.getElementById('authPass').value='';
+    toast('เข้าสู่ระบบแล้ว ✓','ok');
+  }catch(e){
+    toast('ล็อกอินไม่สำเร็จ: '+(e.code||e.message||e),'err');
+  }
+}
+
+async function adminLogout(){
+  if(!auth) return;
+  try{ await auth.signOut(); toast('ออกจากระบบแล้ว','ok'); }catch(e){}
+}
+
+// ติดตามสถานะล็อกอิน
+if(auth){ auth.onAuthStateChanged(u => renderAuthUI(u)); }
 
 /*
   loadQuestions() — ฟังก์ชันเดียวสำหรับดึงข้อสอบทั้งหมด
@@ -1172,7 +1238,7 @@ function renderFirestoreStatus(){
   else if(dataSource.mode==='local-error'){ msg='🔴 อ่าน Firestore ไม่ได้ ('+dataSource.error+') — ใช้ตัวอย่างในเครื่องชั่วคราว'; }
   else { msg='ใช้ข้อมูลตัวอย่างในเครื่อง'; }
   el.textContent=msg;
-  if(seedBtn) seedBtn.style.display = (db && (dataSource.mode==='local-empty')) ? 'inline-flex' : 'none';
+  if(seedBtn) seedBtn.style.display = (db && dataSource.mode==='local-empty' && auth && auth.currentUser) ? 'inline-flex' : 'none';
 }
 
 /* อัปโหลดข้อสอบตัวอย่างขึ้น Firestore (ใช้ครั้งเดียวตอนคลาวด์ยังว่าง) */
